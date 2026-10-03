@@ -293,6 +293,46 @@ async function saveTokens($: any, id: string, v: Saved) {
   await $.store.delete('tokens') // 旧版单份存档不再需要
 }
 
+// 去重：同一请求（agentId + turnId + index）只计一次；只保留最近 SEEN_MAX 个键
+const SEEN_MAX = 200
+const SAVE_EVERY_MS = 2000
+const seen = new Set<string>()
+let lastSaveAt = 0
+let dirty = false
+
+async function persist($: any) {
+  await saveTokens($, await $.session.id(), {
+    up: await read($, upA),
+    down: await read($, downA),
+    cache: await read($, cacheA),
+  })
+  lastSaveAt = await $.clock.now()
+  dirty = false
+}
+
+// 节流保存：最多每 SAVE_EVERY_MS 一次；没存的标记 dirty，由 flushTokens 补存
+async function saveThrottled($: any) {
+  dirty = true
+  if ((await $.clock.now()) - lastSaveAt >= SAVE_EVERY_MS) await persist($)
+}
+
+async function flushTokens($: any) {
+  if (dirty) await persist($)
+}
+
+async function countStep($: any, e: { turnId: string; index: number; agentId?: string }, r: { usage: any }) {
+  const u = r?.usage
+  if (!u) return
+  const key = `${e.agentId ?? ''}|${e.turnId}|${e.index}`
+  if (seen.has(key)) return
+  seen.add(key)
+  if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value as string)
+  await update($, upA, n => n + u.input_tokens + u.cache_creation_input_tokens)
+  await update($, downA, n => n + u.output_tokens)
+  await update($, cacheA, n => n + u.cache_read_input_tokens)
+  await saveThrottled($)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const id = await $.session.id()
@@ -325,19 +365,21 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // 每轮结束累计 token，并存入 $.store 以便重启后恢复
+  // 每次模型请求完成就累计 token（比 turn.complete 细，一轮里数字就会涨）；
+  // turn.complete.usage 是本轮各 step 之和，所以这里不能再在 turn.complete 里累加
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    await countStep($, e, r)
+    return r
+  })
+
+  // 一轮结束 / 会话结束：补存一次，避免节流漏掉最后几步
   on('turn.complete', async ($, e, next) => {
-    const u = e.usage
-    if (u) {
-      await update($, upA, n => n + u.input_tokens + u.cache_creation_input_tokens)
-      await update($, downA, n => n + u.output_tokens)
-      await update($, cacheA, n => n + u.cache_read_input_tokens)
-      await saveTokens($, await $.session.id(), {
-        up: await read($, upA),
-        down: await read($, downA),
-        cache: await read($, cacheA),
-      })
-    }
+    await flushTokens($)
+    return next(e)
+  })
+  on('session.end', async ($, e, next) => {
+    await flushTokens($)
     return next(e)
   })
 
