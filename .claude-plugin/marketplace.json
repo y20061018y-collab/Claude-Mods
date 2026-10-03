@@ -1,5 +1,5 @@
 {
-  "name": "local-mods",
+  "name": "aethor-mods",
   "owner": { "name": "Aethor1s" },
   "metadata": { "description": "本地 Claude Code Mods" },
   "plugins": [

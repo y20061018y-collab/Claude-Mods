@@ -63,21 +63,21 @@ token 累计从 Mod 加载那一刻开始算，每轮结束后按会话 id 存�
 
 ## 安装与卸载
 
-本目录的上一级是一个本地 marketplace（`local-mods`），`usage-bar` 是其中的插件。
+本目录的上一级是一个本地 marketplace（`aethor-mods`），`usage-bar` 是其中的插件。
 
 ```bash
 # 添加 marketplace（把路径换成 claude-mods 文件夹的实际位置）
 claude plugin marketplace add "<path>/claude-mods"
 
 # 安装（默认装到用户级，即所有会话生效）
-claude plugin install usage-bar@local-mods
+claude plugin install usage-bar@aethor-mods
 
 # 临时禁用 / 重新启用
-claude plugin disable usage-bar@local-mods
-claude plugin enable usage-bar@local-mods
+claude plugin disable usage-bar@aethor-mods
+claude plugin enable usage-bar@aethor-mods
 
 # 卸载
-claude plugin uninstall usage-bar@local-mods
+claude plugin uninstall usage-bar@aethor-mods
 ```
 
 也可以在会话里用 `/plugin` 界面操作。不想装 marketplace 时，可用 `claude --plugin-dir <path>/usage-bar` 只在当次会话加载。
