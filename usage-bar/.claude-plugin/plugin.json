@@ -1,0 +1,8 @@
+{
+  "name": "usage-bar",
+  "version": "0.1.0",
+  "description": "常驻输入框上方的用量状态条：5h/7d 额度、token、缓存与会话花费",
+  "author": { "name": "Aethor1s" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
