@@ -405,7 +405,7 @@ export const register: Register = on => {
       const f = (v: View | null) => (v ? `${Math.round(v.pct)}% ↻${fmtTime(v.remaining)}` : '--')
       return (
         <Text dimColor>
-          {`5h ${f(data.h5)} │ 7d ${f(data.d7)} │ ↑${fmtTokens(data.up)} ↓${fmtTokens(data.down)} ⛁${fmtTokens(data.cache)} │ ${
+          {`5h ${f(data.h5)} │ 7d ${f(data.d7)} │ ↑${fmtTokens(data.up)} ↓${fmtTokens(data.down)} cache ${fmtTokens(data.cache)} │ ${
             data.cost === null ? '--' : '$' + data.cost.toFixed(2)
           }${partial ? ' (自加载起)' : ''}`}
         </Text>
