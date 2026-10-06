@@ -7,7 +7,7 @@
       "name": "usage-bar",
       "source": "./usage-bar",
       "description": "常驻输入框上方的用量状态条：5h/7d 额度、token、缓存与会话花费",
-      "version": "0.1.2",
+      "version": "0.1.3",
       "author": { "name": "Aethor1s" }
     }
   ]

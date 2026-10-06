@@ -19,6 +19,10 @@ declare module 'claude-code' {
       now: number
       /** token 累计是否不完整（加载前已有用量且无法恢复） */
       isPartial: boolean
+      /** 最近一次主对话模型请求完成的时间（毫秒），缓存倒计时的起点；还没有请求为 null */
+      cacheAt: number | null
+      /** 最近一次主对话请求的缓存命中率 0~1：cache_read / (cache_read + input + cache_creation) */
+      cacheHit: number | null
     }
   }
 }

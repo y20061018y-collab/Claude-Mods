@@ -43,6 +43,13 @@ const CONFIG = {
   //   'context'：当前上下文占用，不超过模型窗口（十万到百万级），会随压缩/清空回落。
   // 两者差一到两个数量级；样图里的 954.2k 更接近 'context'。
   cacheMode: 'cumulative' as 'cumulative' | 'context',
+  // 缓存倒计时胶囊：最近一次主对话模型请求的时间 + cacheTtlMs。插件接口没有 prompt_cache 数据，只能这样估算。
+  // 官方文档（prompt-caching#cache-lifetime）：订阅账号在套餐额度内，主对话 TTL 为 1 小时；
+  // API key / 云厂商 / 超出额度改用 usage credits 时为 5 分钟。用的是后者就改成 5 * 60_000。
+  cacheTimer: true, // 总开关：false 则不画这颗胶囊、也不起相关定时器
+  cacheTtlMs: 60 * 60_000,
+  cacheWarnFrac: 0.2, // 剩余时间 < TTL 的这个比例：黄色
+  cacheTickMs: 15_000, // 缓存仍热时的倒计时刷新间隔（毫秒）；变黄、过期那两刻另有定时器立即刷新
 }
 // ──────────────────────────────────────────────────────────────
 
@@ -61,6 +68,8 @@ const cacheA = atom({ plugin: 'usage-bar', key: 'cache' } as const, 0)
 const ctxA = atom({ plugin: 'usage-bar', key: 'context' } as const, null as number | null)
 const nowA = atom({ plugin: 'usage-bar', key: 'now' } as const, 0)
 const partialA = atom({ plugin: 'usage-bar', key: 'isPartial' } as const, false)
+const cacheAtA = atom({ plugin: 'usage-bar', key: 'cacheAt' } as const, null as number | null)
+const cacheHitA = atom({ plugin: 'usage-bar', key: 'cacheHit' } as const, null as number | null)
 
 // ───────────── 格式化 ─────────────
 // 数字：<1000 原样，≥1000 用 k，≥1,000,000 用 M，保留一位小数
@@ -73,6 +82,12 @@ const fmtTime = (ms: number) => {
   const d = Math.floor(m / 1440)
   const h = Math.floor((m % 1440) / 60)
   return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m % 60}m` : `${m % 60}m`
+}
+
+// 缓存剩余分钟：向上取整，热的时候至少显示 1m
+const fmtCacheLeft = (ms: number) => {
+  const m = Math.max(1, Math.ceil(ms / 60_000))
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`
 }
 
 const levelColor = (pct: number) =>
@@ -104,6 +119,7 @@ const ICON = {
   up: '<path d="M8 10V2.5M5 5.3l3-3 3 3M2.5 10v3.5h11V10"/>',
   down: '<path d="M8 2v7.5M5 6.5l3 3 3-3M2.5 10v3.5h11V10"/>',
   layers: '<path d="M8 1.8l6 3.2-6 3.2-6-3.2z"/><path d="M2 8l6 3.2L14 8M2 11l6 3.2 6-3.2"/>',
+  hourglass: '<path d="M4 2h8M4 14h8M5 2v2.5c0 1.2.8 2 3 3.5-2.2 1.5-3 2.3-3 3.5V14M11 2v2.5c0 1.2-.8 2-3 3.5 2.2 1.5 3 2.3 3 3.5V14"/>',
   dollar:
     '<circle cx="8" cy="8" r="6.2"/><path d="M8 4v8M10.2 6.3C9.8 5.6 9 5.3 8 5.3c-1.2 0-2 .6-2 1.5S6.8 8 8 8s2 .6 2 1.5-.8 1.5-2 1.5c-1 0-1.8-.4-2.2-1.1"/>',
 }
@@ -173,7 +189,46 @@ function valuePill(x: number, ic: keyof typeof ICON, color: string, value: strin
   return { svg: r.svg + ring, width: r.width }
 }
 
-type Data = { h5: View | null; d7: View | null; up: number; down: number; cache: number; cost: number | null }
+// 缓存倒计时：none = 还没有主对话请求；warm / low（剩余 < cacheWarnFrac）/ cold = 已过期
+type CacheView = { state: 'none' | 'warm' | 'low' | 'cold'; left: number; hit: number | null; ctx: number | null }
+
+function cacheView(at: number | null, hit: number | null, ctx: number | null, now: number): CacheView {
+  if (at === null) return { state: 'none', left: 0, hit, ctx }
+  const left = at + CONFIG.cacheTtlMs - now
+  const state = left <= 0 ? 'cold' : left < CONFIG.cacheTtlMs * CONFIG.cacheWarnFrac ? 'low' : 'warm'
+  return { state, left, hit, ctx }
+}
+
+// 缓存胶囊文字含中文：CJK 字符占一个字号宽，其余按 charRatio；宽度同样用 textLength 锁定
+const textWidth = (s: string) => [...s].reduce((n, c) => n + (/[⺀-鿿＀-￯]/.test(c) ? F : CW), 0)
+
+function cachePill(x: number, v: CacheView) {
+  const color =
+    v.state === 'cold' ? CONFIG.color.danger : v.state === 'low' ? CONFIG.color.warn : v.state === 'warm' ? CONFIG.color.ok : CONFIG.color.cache
+  const label =
+    v.state === 'none'
+      ? '--'
+      : v.state === 'cold'
+        ? `cold · 下条消息约重新缓存 ${v.ctx === null ? '--' : fmtTokens(v.ctx)} tokens`
+        : `${fmtCacheLeft(v.left)} · ${v.hit === null ? '--' : Math.round(v.hit * 100) + '%'}`
+  const w = textWidth(label)
+  return pill(x, color, x0 => ({
+    svg:
+      icon('hourglass', x0, color) +
+      `<text x="${x0 + SLOT}" y="${H / 2 + F * 0.35}" class="t" textLength="${w}" lengthAdjust="spacingAndGlyphs">${label}</text>`,
+    width: SLOT + w,
+  }))
+}
+
+type Data = {
+  h5: View | null
+  d7: View | null
+  up: number
+  down: number
+  cache: number
+  cost: number | null
+  cacheV: CacheView
+}
 type Part = { id: string; draw: (x: number, bw: number) => { svg: string; width: number } }
 
 // 固定 viewBox：所有坐标都在 viewBox 内部算，容器把它整体缩放；不依赖容器像素宽度。
@@ -188,7 +243,8 @@ function buildSvg(d: Data, partial: boolean, slotPx: number) {
     { id: 'cache', draw: x => valuePill(x, 'layers', CONFIG.color.cache, fmtTokens(d.cache), partial) },
     { id: 'cost', draw: x => valuePill(x, 'dollar', CONFIG.color.cost, d.cost === null ? '--' : `$${d.cost.toFixed(2)}`) },
   ]
-  const hideOrder = ['cache', 'down', 'up', 'cost']
+  if (CONFIG.cacheTimer) all.push({ id: 'cacheTtl', draw: x => cachePill(x, d.cacheV) })
+  const hideOrder = ['cacheTtl', 'cache', 'down', 'up', 'cost']
   const bw = CONFIG.barWidth
   const widthOf = (parts: Part[]) => parts.reduce((n, p) => n + p.draw(0, bw).width, 0) + GAP * (parts.length - 1) + 2
 
@@ -258,6 +314,39 @@ async function scheduleReset($: any, limits: Limit[]) {
     await touch($)
     await scheduleReset($, limits)
   })
+}
+
+// 缓存最近一次刷新时间的内存镜像：只用来决定倒计时 ticker 要不要重绘（state 在热重载后保留，render 会重新同步它）
+let cacheAtMem: number | null = null
+let cacheTimerHandles: { cancel: () => void }[] = []
+
+// 缓存还热时，倒计时靠 cacheTickMs 的 ticker 走动；过期、变黄那两刻在这里单独安排一次立即刷新
+async function scheduleCache($: any, at: number | null) {
+  cacheTimerHandles.forEach(h => h.cancel())
+  cacheTimerHandles = []
+  if (!CONFIG.cacheTimer || at === null) return
+  const now = await $.clock.now()
+  const edges = [CONFIG.cacheTtlMs * (1 - CONFIG.cacheWarnFrac), CONFIG.cacheTtlMs]
+  for (const edge of edges) {
+    const wait = at + edge - now + 300
+    if (wait > 0) cacheTimerHandles.push($.clock.after(wait, () => touch($)))
+  }
+}
+
+async function cacheTick($: any) {
+  if (cacheAtMem === null) return
+  if ((await $.clock.now()) - cacheAtMem < CONFIG.cacheTtlMs) await touch($)
+}
+
+// 主对话每完成一次模型请求：刷新缓存计时，命中率 = cache_read / (cache_read + input + cache_creation)
+async function markCache($: any, u: { input_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }) {
+  const total = u.cache_read_input_tokens + u.input_tokens + u.cache_creation_input_tokens
+  if (!CONFIG.cacheTimer || total <= 0) return
+  const at = await $.clock.now()
+  cacheAtMem = at
+  await update($, cacheAtA, () => at)
+  await update($, cacheHitA, () => u.cache_read_input_tokens / total)
+  await scheduleCache($, at)
 }
 
 // 把一次用量快照写进 state
@@ -330,6 +419,8 @@ async function countStep($: any, e: { turnId: string; index: number; agentId?: s
   await update($, upA, n => n + u.input_tokens + u.cache_creation_input_tokens)
   await update($, downA, n => n + u.output_tokens)
   await update($, cacheA, n => n + u.cache_read_input_tokens)
+  // 子代理有自己的缓存，不刷新主对话的倒计时
+  if (!e.agentId) await markCache($, u)
   await saveThrottled($)
 }
 
@@ -356,6 +447,7 @@ export const register: Register = on => {
 
     await sync($, u.rateLimits, u.cost?.usd ?? null, u.context.tokens ?? null)
     $.clock.every(CONFIG.refreshMs, () => touch($))
+    if (CONFIG.cacheTimer) $.clock.every(CONFIG.cacheTickMs, () => cacheTick($))
     return next(e)
   })
 
@@ -389,7 +481,10 @@ export const register: Register = on => {
 
     const now = await $.clock.now()
     const limits = await read($, limitsA)
+    const cacheAt = await read($, cacheAtA)
+    cacheAtMem = cacheAt
     const data: Data = {
+      cacheV: cacheView(cacheAt, await read($, cacheHitA), await read($, ctxA), now),
       h5: windowView(limits.find(l => l.kind === 'five_hour'), now),
       d7: windowView(limits.find(l => l.kind === 'seven_day'), now),
       up: await read($, upA),
@@ -403,11 +498,20 @@ export const register: Register = on => {
     // 终端没有 Svg：退回纯文字
     if (e.surface === 'terminal') {
       const f = (v: View | null) => (v ? `${Math.round(v.pct)}% ↻${fmtTime(v.remaining)}` : '--')
+      const cv = data.cacheV
+      const cacheText = !CONFIG.cacheTimer
+        ? ''
+        : ' │ ' +
+          (cv.state === 'none'
+            ? '缓存 --'
+            : cv.state === 'cold'
+              ? `cold · 下条消息约重新缓存 ${cv.ctx === null ? '--' : fmtTokens(cv.ctx)} tokens`
+              : `缓存 ${fmtCacheLeft(cv.left)} · ${cv.hit === null ? '--' : Math.round(cv.hit * 100) + '%'}`)
       return (
         <Text dimColor>
           {`5h ${f(data.h5)} │ 7d ${f(data.d7)} │ ↑${fmtTokens(data.up)} ↓${fmtTokens(data.down)} cache ${fmtTokens(data.cache)} │ ${
             data.cost === null ? '--' : '$' + data.cost.toFixed(2)
-          }${partial ? ' (自加载起)' : ''}`}
+          }${cacheText}${partial ? ' (自加载起)' : ''}`}
         </Text>
       )
     }
